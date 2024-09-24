@@ -6,6 +6,7 @@ package mr
 // remember to capitalize all names.
 //
 
+
 import "os"
 import "strconv"
 
@@ -13,6 +14,20 @@ import "strconv"
 // example to show how to declare the arguments
 // and reply for an RPC.
 //
+type WorkerArgs struct{
+	MapTaskNumber int 	//finished number
+	ReduceTaskNumber int
+}
+
+type WokerReply struct{
+	Tasktype int 	//0:map,1:reduce,2:waiting,3:finished
+	NMap int	//total map number
+	NReduce int
+
+	MapTaskNumber int 	// to be finish number
+	ReduceTaskNumber int	
+	Filename string 	//for map task
+}
 
 type ExampleArgs struct {
 	X int

@@ -8,6 +8,8 @@ import "time"
 //注意：	kv.mu.Lock()
 //		   defer kv.mu.Unlock()只是对一个clerk中的读写进行锁定
 //但在并发时，是多个client进行读写，此时仍然会出现race问题，需要对map进行并发管理
+//上面的说法是错误的，kvmap不会发生并发问题，但seenid会，需要sync.map
+//问题 可不可以kvmap也用sync.map从而取消锁/或者seenid放在锁结构里
 
 //出现memory占用过高问题 可以使client收到reply后，再次和server发送args表示已收到，此时server可以删除那个requestId
 

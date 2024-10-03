@@ -89,7 +89,20 @@ const Candidate int =1
 const Follower int =2
 
 func(rf *Raft) ChangeState(state int){
-	rf.state=state
+	if rf.state == state {
+		return
+	}
+	Debug(dLeader,"{Node %v} changes state from %v to %v", rf.me, rf.state, state)
+	rf.state = state
+	switch state {
+	case Follower:
+		rf.electionTime.Reset(RandomElectionTimeout())
+		rf.heartbeatTime.Stop() // stop heartbeat
+	case Candidate:
+	case Leader:
+		rf.electionTime.Stop() // stop election
+		rf.heartbeatTime.Reset(StableHeartbeatTimeout())
+	}
 
 }
 
@@ -190,6 +203,7 @@ type AppendEntriesReply struct{
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	Debug(dInfo,"{Node %v} receives RequestVoteArgs %v and raft :currentTerm: %v votedfor %v", rf.me, args,rf.currentTerm,rf.votedFor)
 	// Your code here (3A, 3B).
 	if args.Term<rf.currentTerm {
 		reply.Term=rf.currentTerm
@@ -225,7 +239,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){ 
 	if args.Entries==nil { //心跳
+		Debug(dInfo,"{Node %v} receives Heartbeat from {Node %v} ", rf.me, args.LeaderId)
+		if args.Term > rf.currentTerm {
+			rf.currentTerm, rf.votedFor = args.Term, -1
+			rf.persist()
+		}
+		rf.votedFor=-1
 		rf.ChangeState(Follower) 
+		rf.currentTerm=args.Term
 		rf.heartbeatTime.Reset(StableHeartbeatTimeout())
 		rf.electionTime.Reset(RandomElectionTimeout())
 		reply.Success=false
@@ -362,6 +383,7 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) BoardCastHeartbeat(){  //leader can do
+	Debug(dInfo,"{Node %v} starts BoardCastHeartbeat", rf.me)
 	for peer:=range rf.peers {
 		if peer==rf.me {
 			continue

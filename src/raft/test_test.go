@@ -33,6 +33,7 @@ func TestInitialElection3A(t *testing.T) {
 	// election, then check that all peers agree on the term.
 	time.Sleep(50 * time.Millisecond)
 	term1 := cfg.checkTerms()
+	Debug(dTest,"term1 is %v", term1)
 	if term1 < 1 {
 		t.Fatalf("term is %v, but should be at least 1", term1)
 	}
@@ -40,6 +41,7 @@ func TestInitialElection3A(t *testing.T) {
 	// does the leader+term stay the same if there is no network failure?
 	time.Sleep(2 * RaftElectionTimeout)
 	term2 := cfg.checkTerms()
+	Debug(dTest,"term2 is %v", term2)
 	if term1 != term2 {
 		fmt.Printf("warning: term changed even though there were no failures")
 	}
@@ -58,7 +60,7 @@ func TestReElection3A(t *testing.T) {
 	cfg.begin("Test (3A): election after network failure")
 
 	leader1 := cfg.checkOneLeader()
-
+	Debug(dTest,"leader1 is %v", leader1)
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
@@ -68,7 +70,7 @@ func TestReElection3A(t *testing.T) {
 	// should switch to follower.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
-
+	Debug(dTest,"leader2 is %v", leader2)
 	// if there's no quorum, no new leader should
 	// be elected.
 	cfg.disconnect(leader2)

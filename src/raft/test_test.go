@@ -80,15 +80,15 @@ func TestReElection3A(t *testing.T) {
 	// check that the one connected server
 	// does not think it is the leader.
 	cfg.checkNoLeader()
-
+	Debug(dInfo,"checkNoLeader")
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
-
+	Debug(dInfo,"checkOneLeader")
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
-
+	Debug(dInfo,"checkOneLeader")
 	cfg.end()
 }
 

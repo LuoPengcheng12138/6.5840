@@ -14,7 +14,7 @@ import ("log"
 // 		log.Printf(format, a...)
 // 	}
 // }
-const debug = 0
+const debug = 1
 func Debug(topic logTopic, format string, a ...interface{}) {
 	if debug >= 1 {
 		time := time.Since(debugStart).Microseconds()
@@ -47,27 +47,7 @@ func (rf *Raft) getFirstLog() LogEntry {
 	return rf.log[0]
 }
 
-func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs{
-	args:=&RequestVoteArgs{
-		Term: rf.currentTerm,
-		CalledcandidateId: rf.me,
-		LastLogIndex: rf.getLastLog().Index,
-		LastLogTerm: rf.getLastLog().Term,
-	}
-	return args
-}
 
-func (rf *Raft) genAppendEntriesArgs() *AppendEntriesArgs{
-	firstLogIndex := rf.getFirstLog().Index //第一个log的index
-	prevLogIndex :=rf.nextIndex[rf.me] - 1 //最后一个log的index
-	args:=&AppendEntriesArgs{
-		Term :rf.currentTerm,
-		LeaderId :rf.me,
-		PrevLogIndex : prevLogIndex,
-		PrevLogTerm :rf.log[prevLogIndex-firstLogIndex].Term,
-		Entries :nil,  //todooo
-		LeaderCommit :rf.commitIndex,
-	}
-	return args
-}
+
+
 

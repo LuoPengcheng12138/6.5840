@@ -46,7 +46,7 @@ func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs {
 
 func (rf *Raft) genAppendEntriesArgs() *AppendEntriesArgs{
 	firstLogIndex := rf.getFirstLog().Index //第一个log的index
-	prevLogIndex :=rf.nextIndex[rf.me] - 1 //最后一个log的index
+	prevLogIndex :=rf.nextIndex[rf.me]  //最后一个log的index
 	args:=&AppendEntriesArgs{
 		Term :rf.currentTerm,
 		LeaderId :rf.me,

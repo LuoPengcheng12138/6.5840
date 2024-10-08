@@ -19,7 +19,7 @@ package raft
 
 import (
 	"bytes"
-	"math/rand"
+	//"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -99,6 +99,8 @@ func(rf *Raft) ChangeState(state int){
 		rf.electionTime.Reset(RandomElectionTimeout())
 		rf.heartbeatTime.Stop() // stop heartbeat
 	case Candidate:
+		rf.electionTime.Reset(RandomElectionTimeout())
+		rf.heartbeatTime.Stop() // stop heartbeat
 	case Leader:
 		rf.electionTime.Stop() // stop election
 		rf.heartbeatTime.Reset(StableHeartbeatTimeout())
@@ -181,54 +183,83 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	Debug(dInfo,"{Node %v} receives RequestVoteArgs %v and raft :currentTerm: %v votedfor %v", rf.me, args,rf.currentTerm,rf.votedFor)
 	// Your code here (3A, 3B).
-	if args.Term<rf.currentTerm {
-		reply.Term=rf.currentTerm
-		reply.VoteGranted=false
+	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CalledcandidateId) {
+		reply.Term, reply.VoteGranted = rf.currentTerm, false
 		return
 	}
-	if  rf.votedFor!=-1&&rf.votedFor!=args.CalledcandidateId {
-		reply.Term=rf.currentTerm
-		reply.VoteGranted=false
-		return
-	}
-	if !rf.IsLogUpdate(args.LastLogTerm,args.LastLogIndex){
-		reply.Term=rf.currentTerm
-		reply.VoteGranted=false
-		return
-	}
-	if args.Term>rf.currentTerm {
-		reply.Term=args.Term
-		reply.VoteGranted=true
-		rf.currentTerm=args.Term
-		rf.votedFor=args.CalledcandidateId
+
+	if args.Term > rf.currentTerm {
 		rf.ChangeState(Follower)
-		rf.electionTime.Reset(RandomElectionTimeout())
-		return
-	}else{
-		reply.Term=args.Term
-		reply.VoteGranted=true
-		rf.votedFor=args.CalledcandidateId
-		rf.electionTime.Reset(RandomElectionTimeout())
+		rf.currentTerm, rf.votedFor = args.Term, -1
+		rf.persist()
 	}
+
+	// if candidate's log is not up-to-date, reject the vote(§5.4)
+	if !rf.IsLogUpdate(args.LastLogIndex, args.LastLogTerm) {
+		reply.Term, reply.VoteGranted = rf.currentTerm, false
+		return
+	}
+
+	rf.votedFor = args.CalledcandidateId
+	rf.persist()
+	rf.electionTime.Reset(RandomElectionTimeout())
+	reply.Term, reply.VoteGranted = rf.currentTerm, true
+	// if args.Term<rf.currentTerm {
+	// 	reply.Term=rf.currentTerm
+	// 	reply.VoteGranted=false
+	// 	return
+	// }
+	// if  rf.votedFor!=-1&&rf.votedFor!=args.CalledcandidateId {
+	// 	reply.Term=rf.currentTerm
+	// 	reply.VoteGranted=false
+	// 	return
+	// }
+	// if !rf.IsLogUpdate(args.LastLogTerm,args.LastLogIndex){
+	// 	reply.Term=rf.currentTerm
+	// 	reply.VoteGranted=false
+	// 	return
+	// }
+	// if args.Term>rf.currentTerm {
+	// 	reply.Term=args.Term
+	// 	reply.VoteGranted=true
+	// 	rf.currentTerm=args.Term
+	// 	rf.votedFor=args.CalledcandidateId
+	// 	rf.ChangeState(Follower)
+	// 	rf.electionTime.Reset(RandomElectionTimeout())
+	// 	return
+	// }else{
+	// 	reply.Term=args.Term
+	// 	reply.VoteGranted=true
+	// 	rf.votedFor=args.CalledcandidateId
+	// 	rf.electionTime.Reset(RandomElectionTimeout())
+	// }
 
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){ 
-	if args.Entries==nil { //心跳
-		Debug(dInfo,"{Node %v} state:%v receives Heartbeat from {Node %v} ", rf.me, rf.state,args.LeaderId)
-		if args.Term > rf.currentTerm {
-			rf.currentTerm, rf.votedFor = args.Term, -1
-			rf.persist()
-		}
-		rf.votedFor=-1
-		rf.ChangeState(Follower) 
-		rf.currentTerm=args.Term
-		rf.heartbeatTime.Reset(StableHeartbeatTimeout())
-		rf.electionTime.Reset(RandomElectionTimeout())
-		reply.Success=false
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer Debug(dInfo,"{Node %v}'s state is {state %v, term %v}} after processing AppendEntries,  AppendEntriesArgs %v and AppendEntriesReply %v ", rf.me, rf.state, rf.currentTerm, args, reply)
+	// Reply false if term < currentTerm(§5.1)
+	if args.Term < rf.currentTerm {
+		reply.Term, reply.Success = rf.currentTerm, false
+		return
 	}
+	// heartbeat 
+	if args.Term > rf.currentTerm {
+		rf.currentTerm, rf.votedFor = args.Term, -1
+		rf.persist()
+	}
+	rf.ChangeState(Follower) 
+	Debug(dInfo,"{Node %v}'s receives HB and changes to Follower", rf.me)
+	rf.electionTime.Reset(RandomElectionTimeout())
+
+	reply.Term,reply.Success=rf.currentTerm,false
+	
 } 
 
 func (rf *Raft) IsLogUpdate(logterm,logindex int) bool{
@@ -310,6 +341,7 @@ func (rf *Raft) ticker() {
 						rf.StartElection()
 
 					case Candidate:	
+						rf.currentTerm+=1
 						rf.electionTime.Reset(RandomElectionTimeout())
 						rf.StartElection()
 				}
@@ -321,74 +353,45 @@ func (rf *Raft) ticker() {
 		// // milliseconds.
 		// ms := 50 + (rand.Int63() % 300)
 		// time.Sleep(time.Duration(ms) * time.Millisecond)
-		
+
 	}
 }
 
-func (rf *Raft) BoardCastHeartbeat(){  //leader can do
-	// Debug(dInfo,"{Node %v} starts BoardCastHeartbeat", rf.me)
-	// for peer:=range rf.peers {
-	// 	if peer==rf.me {
-	// 		continue
-	// 	}
-	// 	firstLogIndex := rf.getFirstLog().Index //第一个log的index
-	// 	prevLogIndex:=0
-	// 	if rf.nextIndex[peer] - 1>=0 {
-	// 		prevLogIndex =rf.nextIndex[peer] - 1 //最后一个log的index
-	// 	}else {
-	// 		prevLogIndex=0
-	// 	}
-	// 	args:=&AppendEntriesArgs{
-	// 		Term :rf.currentTerm,
-	// 		LeaderId :rf.me,
-	// 		PrevLogIndex : prevLogIndex,
-	// 		PrevLogTerm :rf.log[prevLogIndex-firstLogIndex].Term,
-	// 		Entries :nil,
-	// 		LeaderCommit :rf.commitIndex,
-	// 	}
-	// 	reply:=&AppendEntriesReply{}
-	// 	Debug(dInfo,"{Node %v} starts BoardCastHeartbeat to {Node %v}", rf.me,peer)
-	// 	rf.sendAppendEntries(peer,args,reply)
-
-	// }
-	args := rf.genAppendEntriesArgs(prevLogIndex)
-	rf.mu.RUnlock()
-	reply := new(AppendEntriesReply)
-	if rf.sendAppendEntries(peer, args, reply) {
-		rf.mu.Lock()
-		if args.Term == rf.currentTerm && rf.state == Leader {
-			if !reply.Success {
-				if reply.Term > rf.currentTerm {
-					// indicate current server is not the leader
-					rf.ChangeState(Follower)
-					rf.currentTerm, rf.votedFor = reply.Term, -1
-					rf.persist()
-				} else if reply.Term == rf.currentTerm {
-					// decrease nextIndex and retry
-					rf.nextIndex[peer] = reply.ConflictIndex
-					// TODO: optimize the nextIndex finding, maybe use binary search
-					if reply.ConflictTerm != -1 {
-						firstLogIndex := rf.getFirstLog().Index
-						for index := args.PrevLogIndex - 1; index >= firstLogIndex; index-- {
-							if rf.logs[index-firstLogIndex].Term == reply.ConflictTerm {
-								rf.nextIndex[peer] = index
-								break
-							}
+func (rf *Raft) BoardCastHeartbeat() {  //leader can do
+	Debug(dInfo,"{Node %v} starts BoardCastHeartbeat", rf.me)
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock() //会发生死锁 BoardCastHeartbeat->StartElection->ticker(有锁)
+	for peer:=range rf.peers {
+		
+		if peer==rf.me {
+			continue
+		}
+		go func(peer int) {
+			args := rf.genAppendEntriesArgs()
+			reply := new(AppendEntriesReply)
+			Debug(dVote,"{Node %v} starts send HB to {Node %v}", rf.me, peer)
+			if rf.sendAppendEntries(peer, args, reply) {
+				if args.Term == rf.currentTerm && rf.state == Leader {
+					if !reply.Success {//HB return false
+						if reply.Term > rf.currentTerm {
+							// indicate current server is not the leader
+							rf.ChangeState(Follower)
+							rf.currentTerm, rf.votedFor = reply.Term, -1
+							rf.persist()
+						} else if reply.Term == rf.currentTerm {
+							// decrease nextIndex and retry
+							// TODO: optimize the nextIndex finding, maybe use binary search
+						
+								
 						}
+					} else {
+		
 					}
 				}
-			} else {
-				rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
-				rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-				// advance commitIndex if possible
-				rf.advanceCommitIndexForLeader()
+				Debug(dLeader,"{Node %v} sends AppendEntriesArgs %v to {Node %v} and receives AppendEntriesReply %v", rf.me, args, peer, reply)
 			}
-		}
-		rf.mu.Unlock()
-		DPrintf("{Node %v} sends AppendEntriesArgs %v to {Node %v} and receives AppendEntriesReply %v", rf.me, args, peer, reply)
+		}(peer)
 	}
-
-	
 }
 
 
@@ -405,6 +408,7 @@ func (rf *Raft) StartElection() {
 		}
 		go func(peer int) {
 			reply := new(RequestVoteReply)
+			Debug(dVote,"{Node %v} starts election to {Node %v}", rf.me, peer)
 			if rf.sendRequestVote(peer, args, reply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()

@@ -72,8 +72,8 @@ type Raft struct {
 	lastApplied int
 
 	//volatile state on leaders
-	nextIndex []int
-	matchIndex []int
+	nextIndex []int // index of the next log entry to send to that server
+	matchIndex []int // index of highest log entry known to be replicated on server
 
 	//other argument
 	state int //Leader:0 Candidate:1 Follower:2
@@ -81,6 +81,10 @@ type Raft struct {
 	electionTime *time.Timer
 	heartbeatTime *time.Timer
 
+	applyCond      chan int    // condition variable for apply goroutine
+	replicatorCond []chan int  // condition variable for replicator goroutine
+	// applyCond      *sync.Cond    // condition variable for apply goroutine
+	// replicatorCond []*sync.Cond  // condition variable for replicator goroutine
 
 }
 
@@ -208,54 +212,26 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.persist()
 	rf.electionTime.Reset(RandomElectionTimeout())
 	reply.Term, reply.VoteGranted = rf.currentTerm, true
-	// if args.Term<rf.currentTerm {
-	// 	reply.Term=rf.currentTerm
-	// 	reply.VoteGranted=false
-	// 	return
-	// }
-	// if  rf.votedFor!=-1&&rf.votedFor!=args.CalledcandidateId {
-	// 	reply.Term=rf.currentTerm
-	// 	reply.VoteGranted=false
-	// 	return
-	// }
-	// if !rf.IsLogUpdate(args.LastLogTerm,args.LastLogIndex){
-	// 	reply.Term=rf.currentTerm
-	// 	reply.VoteGranted=false
-	// 	return
-	// }
-	// if args.Term>rf.currentTerm {
-	// 	reply.Term=args.Term
-	// 	reply.VoteGranted=true
-	// 	rf.currentTerm=args.Term
-	// 	rf.votedFor=args.CalledcandidateId
-	// 	rf.ChangeState(Follower)
-	// 	rf.electionTime.Reset(RandomElectionTimeout())
-	// 	return
-	// }else{
-	// 	reply.Term=args.Term
-	// 	reply.VoteGranted=true
-	// 	rf.votedFor=args.CalledcandidateId
-	// 	rf.electionTime.Reset(RandomElectionTimeout())
-	// }
-
+	
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){ 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer Debug(dInfo,"{Node %v}'s state is {state %v, term %v}} after processing AppendEntries,  AppendEntriesArgs %v and AppendEntriesReply %v ", rf.me, rf.state, rf.currentTerm, args, reply)
+	
 	// Reply false if term < currentTerm(§5.1)
 	if args.Term < rf.currentTerm {
 		reply.Term, reply.Success = rf.currentTerm, false
 		return
 	}
-	// heartbeat 
+	// this is heartbeat 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm, rf.votedFor = args.Term, -1
 		rf.persist()
 	}
+	// AppendEntries 都是心跳 都要changeState
 	rf.ChangeState(Follower) 
-	Debug(dInfo,"{Node %v}'s receives HB and changes to Follower", rf.me)
 	rf.electionTime.Reset(RandomElectionTimeout())
 
 	reply.Term,reply.Success=rf.currentTerm,false
@@ -284,16 +260,50 @@ func (rf *Raft) IsLogUpdate(logterm,logindex int) bool{
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+//开始对一个新的命令进行一致性协议（即将该命令添加到 Raft 的日志中）
+//新日志索引：如果命令被提交，命令将在日志中的位置
+//当前任期：Raft 实例的当前任期
+//是否是领导者：当前服务器是否认为自己是领导者
+// submit a command 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := false
 
 	// Your code here (3B).
+	if rf.state!=Leader {
+		return -1,-1,false
+	}
+	//将command添加到日志
+	newLogIndex := rf.getLastLog().Index + 1
+	rf.log=append(rf.log, LogEntry{
+		Term :rf.currentTerm,
+		Index :rf.getLastLog().Index+1,
+		Command :command,
+	})
+	//
 
+	//** 更新匹配和下一索引 **
+	rf.nextIndex[rf.me]=newLogIndex+1
+	rf.matchIndex[rf.me]=newLogIndex
 
-	return index, term, isLeader
+	Debug(dLeader,"{Node %v} starts agreement on a new log entry with command %v in term %v", rf.me, command, rf.currentTerm)
+	
+	//广播日志 TODO 自己不做 通过chan 通知 replicator 的 goruntion 去做，会循环查询 replicatorCond 状态
+	for peer:=range rf.peers {
+		if peer==rf.me {
+			continue
+		}
+		rf.replicatorCond[peer]<-1 //signal
+
+	}
+
+	index=newLogIndex
+	term=rf.currentTerm
+	isLeader=true
+	return index,term,isLeader
 }
+
 
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
@@ -348,17 +358,44 @@ func (rf *Raft) ticker() {
 				rf.mu.Unlock()
 
 		}
-		
-		// // pause for a random amount of time between 50 and 350
-		// // milliseconds.
-		// ms := 50 + (rand.Int63() % 300)
-		// time.Sleep(time.Duration(ms) * time.Millisecond)
 
 	}
 }
 
+func(rf *Raft) replicator(peer int){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for !rf.killed(){
+		select {
+			case <-rf.replicatorCond[peer]:
+				if rf.state == Leader && rf.matchIndex[peer] < rf.getLastLog().Index {
+					rf.BoardCastLogs(peer)
+				}
+			default:
+				time.Sleep(50 * time.Millisecond) // 可调节的休眠时间
+			}
+
+	}
+	
+}
+
+func (rf *Raft) BoardCastLogs(peer int) { 
+	Debug(dLeader,"{Node %v} starts BoardCast-Logs", rf.me)
+	for peer:=range rf.peers {	
+		if peer==rf.me {
+			continue
+		}
+
+		
+		
+	
+	}
+
+	
+}
+
 func (rf *Raft) BoardCastHeartbeat() {  //leader can do
-	Debug(dInfo,"{Node %v} starts BoardCastHeartbeat", rf.me)
+	Debug(dLeader,"{Node %v} starts BoardCast-Heartbeat", rf.me)
 	// rf.mu.Lock()
 	// defer rf.mu.Unlock() //会发生死锁 BoardCastHeartbeat->StartElection->ticker(有锁)
 	for peer:=range rf.peers {
@@ -367,7 +404,8 @@ func (rf *Raft) BoardCastHeartbeat() {  //leader can do
 			continue
 		}
 		go func(peer int) {
-			args := rf.genAppendEntriesArgs()
+			prevLogIndex := rf.nextIndex[peer] - 1
+			args := rf.genAppendEntriesArgs(prevLogIndex)
 			reply := new(AppendEntriesReply)
 			Debug(dVote,"{Node %v} starts send HB to {Node %v}", rf.me, peer)
 			if rf.sendAppendEntries(peer, args, reply) {
@@ -444,6 +482,7 @@ func (rf *Raft) StartElection() {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	// Your initialization code here (3A, 3B, 3C).
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -458,20 +497,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex=make([]int, len(peers))
 	rf.nextIndex=make([]int, len(peers))
 	rf.matchIndex=make([]int, len(peers))
-	for i := range rf.matchIndex {
-		rf.matchIndex[i] = -1
-	}
 	rf.state=Follower
 	rf.electionTime=time.NewTimer(RandomElectionTimeout())
 	rf.heartbeatTime=time.NewTimer(StableHeartbeatTimeout())
 	rf.applyCh= applyCh
-
-
-
-	// Your initialization code here (3A, 3B, 3C).
+	rf.applyCond=make(chan int)
+	rf.replicatorCond=make([]chan int, len(peers))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	for peer :=range peers {
+		rf.matchIndex[peer]=0
+		rf.nextIndex[peer]=rf.getLastLog().Index+1
+		// if peer!=rf.me {
+		// 	go rf.replicator(peer)
+		// }
+
+	}
+
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

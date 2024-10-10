@@ -44,15 +44,18 @@ func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs {
 
 }
 
-func (rf *Raft) genAppendEntriesArgs() *AppendEntriesArgs{
-	firstLogIndex := rf.getFirstLog().Index //第一个log的index
-	prevLogIndex :=rf.nextIndex[rf.me]  //最后一个log的index
+//prevLogIndex：跟随者应该在其日志中查找的最后一条已知条目的索引
+func (rf *Raft) genAppendEntriesArgs(prevLogIndex int) *AppendEntriesArgs{
+	firstLogIndex := rf.getFirstLog().Index //本地第一个log的index 
+	//eg:prevLogIndex=7 (peer) 那么拷贝rf中 log[prevLogIndex] 后面的entry就行 但是要减去 firstLogIndex=4 (me)基数才是logs中的位置
+	entries:=make([]LogEntry,len(rf.log[prevLogIndex-firstLogIndex+1:])) //+1表明拷贝log[prevLogIndex]后面的entry
+	copy(entries,rf.log[prevLogIndex-firstLogIndex+1:])
 	args:=&AppendEntriesArgs{
 		Term :rf.currentTerm,
 		LeaderId :rf.me,
 		PrevLogIndex : prevLogIndex,
 		PrevLogTerm :rf.log[prevLogIndex-firstLogIndex].Term,
-		Entries :nil,  //todooo
+		Entries :entries,  //todooo
 		LeaderCommit :rf.commitIndex,
 	}
 	return args

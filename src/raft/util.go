@@ -14,7 +14,7 @@ import ("log"
 // 		log.Printf(format, a...)
 // 	}
 // }
-const debug = 0
+const debug = 1
 func Debug(topic logTopic, format string, a ...interface{}) {
 	if debug >= 1{
 		time := time.Since(debugStart).Microseconds()
@@ -46,8 +46,32 @@ func (rf *Raft) getLastLog() LogEntry {
 func (rf *Raft) getFirstLog() LogEntry {
 	return rf.log[0]
 }
+func (rf *Raft) isLogMatched(index, term int) bool {
+	return index <= rf.getLastLog().Index && term == rf.log[index-rf.getFirstLog().Index].Term
+}
+
+func (rf *Raft) IsLogUpdate(logterm,logindex int) bool{
+	lastlog:=rf.log[len(rf.log)-1]
+	if logterm>lastlog.Term ||(logterm==lastlog.Term&&logindex>=lastlog.Index){
+		return true
+	}
+	return false
+}
+func Min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func Max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
 
 
 
 
-
+//TIMR,VOTE,LEAD,TERM,LOG1,LOG2,CMIT,PERS,SNAP,DROP,CLNT,TEST,INFO,WARN,ERRO,TRCE

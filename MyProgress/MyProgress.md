@@ -16,3 +16,7 @@ Lab3A：
 
 Lab3B:
 1 Start提交命令时 更新自己的 rf.nextIndex[rf.me]=newLogIndex+1 && rf.matchIndex[rf.me]=newLogIndex
+2 func(rf *Raft) replicator(peer int) 不能加锁 有很多peer 会发生死锁
+3 for i := range rf.peers {
+		rf.replicatorCond[i] = make(chan int) //无缓冲通道
+	}  // 使用chan作为信号量 要设置无缓冲通道

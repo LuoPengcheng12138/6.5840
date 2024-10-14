@@ -234,17 +234,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.ChangeState(Follower) 
 	rf.electionTime.Reset(RandomElectionTimeout())
 
-	reply.Term,reply.Success=rf.currentTerm,false
-	
-} 
+	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm(§5.3)
+	// Todo
 
-func (rf *Raft) IsLogUpdate(logterm,logindex int) bool{
-	lastlog:=rf.log[len(rf.log)-1]
-	if logterm>lastlog.Term ||(logterm==lastlog.Term&&logindex>=lastlog.Index){
-		return true
+	// if an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it(§5.3)
+	if !rf.isLogMatched(args.PrevLogIndex,args.PrevLogTerm){ //return false ：index 不匹配 ｜｜term不匹配
+		reply.Term,reply.Success=rf.currentTerm,false // **
+		if args.PrevLogIndex>rf.getLastLog().Index{ //index 不匹配 
+			reply.ConflictIndex=rf.getLastLog().Index+1
+			reply.ConflictTerm=-1
+		}else{		//term不匹配
+			index:=args.PrevLogIndex
+			fristlogindex:=rf.getFirstLog().Index
+			for index>=fristlogindex && rf.log[index-fristlogindex].Term==args.PrevLogTerm{
+				index--
+			}
+			reply.ConflictIndex=index+1
+			reply.ConflictTerm=args.PrevLogTerm
+		}
+		return // **
 	}
-	return false
-}
+	//
+	firstLogIndex:=rf.getFirstLog().Index
+	rf.log=append(rf.log[:args.PrevLogIndex+1-firstLogIndex],args.Entries...)
+	Debug(dWarn,"################# folllower log: %v",rf.log)
+
+	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry) (paper)
+	newCommitIndex := Min(args.LeaderCommit, rf.getLastLog().Index)
+	if newCommitIndex > rf.commitIndex {
+		Debug(dInfo,"{Node %v} advances commitIndex from %v to %v with leaderCommit %v in term %v", rf.me, rf.commitIndex, newCommitIndex, args.LeaderCommit, rf.currentTerm)
+		rf.commitIndex = newCommitIndex
+		//rf.applyCond.Signal()
+	}
+	reply.Term, reply.Success = rf.currentTerm, true
+} 
 
 
 
@@ -270,6 +293,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := false
 
+	//Debug(dLeader,"{Node %v} Start function ",rf.me)
+
 	// Your code here (3B).
 	if rf.state!=Leader {
 		return -1,-1,false
@@ -281,26 +306,30 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index :rf.getLastLog().Index+1,
 		Command :command,
 	})
-	//
-
+	
+	Debug(dWarn,"{Node %v}将{command %v}添加到日志 index:%v",rf.me,command,rf.getLastLog().Index)
+	Debug(dWarn,"################# leader log: %v",rf.log)
 	//** 更新匹配和下一索引 **
 	rf.nextIndex[rf.me]=newLogIndex+1
 	rf.matchIndex[rf.me]=newLogIndex
 
-	Debug(dLeader,"{Node %v} starts agreement on a new log entry with command %v in term %v", rf.me, command, rf.currentTerm)
+	Debug(dWarn,"{Node %v} starts agreement on a new log entry with command %v in term %v", rf.me, command, rf.currentTerm)
 	
 	//广播日志 TODO 自己不做 通过chan 通知 replicator 的 goruntion 去做，会循环查询 replicatorCond 状态
 	for peer:=range rf.peers {
 		if peer==rf.me {
 			continue
 		}
+		Debug(dWarn,"{Node %v} replicatorCond[%v]<-1", rf.me, peer)
 		rf.replicatorCond[peer]<-1 //signal
 
 	}
+	Debug(dWarn,"{Node %v} 广播日志 index:%v",rf.me,rf.getLastLog().Index)
 
 	index=newLogIndex
 	term=rf.currentTerm
 	isLeader=true
+	Debug(dWarn,"index %v,term %v,isLeader %v",index,term,isLeader)
 	return index,term,isLeader
 }
 
@@ -363,39 +392,61 @@ func (rf *Raft) ticker() {
 }
 
 func(rf *Raft) replicator(peer int){
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	// rf.mu.Lock() 	//不能加锁 有很多peer 会发生死锁
+	// defer rf.mu.Unlock()  
+	Debug(dInfo,"{Node %v} starts replicator  to {Node %v}", rf.me,peer)
+	//Debug(dLeader,"{Node %v} received replicatorCond[%v] value:%v", rf.me, peer,<-rf.replicatorCond[peer])
 	for !rf.killed(){
 		select {
 			case <-rf.replicatorCond[peer]:
+				Debug(dLeader,"{Node %v} received replicatorCond[%v]<-1", rf.me, peer)
 				if rf.state == Leader && rf.matchIndex[peer] < rf.getLastLog().Index {
 					rf.BoardCastLogs(peer)
 				}
 			default:
 				time.Sleep(50 * time.Millisecond) // 可调节的休眠时间
 			}
-
 	}
-	
 }
 
 func (rf *Raft) BoardCastLogs(peer int) { 
+	rf.mu.Lock()
+	defer rf.mu.Unlock() 
 	Debug(dLeader,"{Node %v} starts BoardCast-Logs", rf.me)
-	for peer:=range rf.peers {	
-		if peer==rf.me {
-			continue
+
+	prevLogIndex := rf.nextIndex[peer] - 1
+	args:=rf.genAppendEntriesArgs(prevLogIndex)
+	reply:=new(AppendEntriesReply)
+	if rf.sendAppendEntries(peer,args,reply){
+		if !reply.Success{ //false 说明log不匹配 或者 follower term > leader
+			if reply.Term>rf.currentTerm{
+				rf.ChangeState(Follower)
+				rf.currentTerm, rf.votedFor = reply.Term, -1
+			}else { //log not match
+				rf.nextIndex[peer]=reply.ConflictIndex
+				if reply.ConflictIndex!=-1{
+					index:=args.PrevLogIndex
+					firstLogIndex:=rf.getFirstLog().Index
+					for index>=firstLogIndex{
+						if rf.log[index-firstLogIndex].Term==reply.ConflictTerm{
+							rf.nextIndex[peer]=index
+							break
+						}
+						index--
+					}
+				}
+			}
+		}else{ //没有冲突 日志添加成功
+			rf.matchIndex[peer]=args.PrevLogIndex+len(args.Entries)
+			rf.nextIndex[peer]=rf.matchIndex[peer]+1
+			// **
 		}
-
-		
-		
-	
+		Debug(dLog,"BoardCast-Logs :{Node %v} sends AppendEntriesArgs %v to {Node %v} and receives AppendEntriesReply %v", rf.me, args, peer, reply)
 	}
-
-	
 }
 
 func (rf *Raft) BoardCastHeartbeat() {  //leader can do
-	Debug(dLeader,"{Node %v} starts BoardCast-Heartbeat", rf.me)
+	//Debug(dLeader,"{Node %v} starts BoardCast-Heartbeat", rf.me)
 	// rf.mu.Lock()
 	// defer rf.mu.Unlock() //会发生死锁 BoardCastHeartbeat->StartElection->ticker(有锁)
 	for peer:=range rf.peers {
@@ -407,26 +458,19 @@ func (rf *Raft) BoardCastHeartbeat() {  //leader can do
 			prevLogIndex := rf.nextIndex[peer] - 1
 			args := rf.genAppendEntriesArgs(prevLogIndex)
 			reply := new(AppendEntriesReply)
-			Debug(dVote,"{Node %v} starts send HB to {Node %v}", rf.me, peer)
 			if rf.sendAppendEntries(peer, args, reply) {
-				if args.Term == rf.currentTerm && rf.state == Leader {
-					if !reply.Success {//HB return false
-						if reply.Term > rf.currentTerm {
-							// indicate current server is not the leader
-							rf.ChangeState(Follower)
-							rf.currentTerm, rf.votedFor = reply.Term, -1
-							rf.persist()
-						} else if reply.Term == rf.currentTerm {
-							// decrease nextIndex and retry
-							// TODO: optimize the nextIndex finding, maybe use binary search
-						
-								
-						}
-					} else {
-		
-					}
+				if args.Term == rf.currentTerm && rf.state == Leader {			
+					if reply.Term > rf.currentTerm {
+						// indicate current server is not the leader
+						rf.ChangeState(Follower)
+						rf.currentTerm, rf.votedFor = reply.Term, -1
+						rf.persist()
+					} else if reply.Term == rf.currentTerm {
+						// decrease nextIndex and retry
+						// TODO: optimize the nextIndex finding, maybe use binary search		
+					}				
 				}
-				Debug(dLeader,"{Node %v} sends AppendEntriesArgs %v to {Node %v} and receives AppendEntriesReply %v", rf.me, args, peer, reply)
+				Debug(dLeader,"BoardCast-Heartbeat :{Node %v} sends AppendEntriesArgs %v to {Node %v} and receives AppendEntriesReply %v", rf.me, args, peer, reply)
 			}
 		}(peer)
 	}
@@ -503,15 +547,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh= applyCh
 	rf.applyCond=make(chan int)
 	rf.replicatorCond=make([]chan int, len(peers))
+	for i := range rf.peers {
+		rf.replicatorCond[i] = make(chan int) //无缓冲通道
+	}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	for peer :=range peers {
 		rf.matchIndex[peer]=0
 		rf.nextIndex[peer]=rf.getLastLog().Index+1
-		// if peer!=rf.me {
-		// 	go rf.replicator(peer)
-		// }
+		if peer!=rf.me {
+			//Debug(dInfo,"{Node %v} starts replicator go runtion %v", rf.me,peer)
+			go rf.replicator(peer)
+		}
 
 	}
 

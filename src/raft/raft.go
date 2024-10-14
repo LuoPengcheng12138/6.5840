@@ -42,6 +42,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm int
 
 	// For 3D:
 	SnapshotValid bool
@@ -235,15 +236,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTime.Reset(RandomElectionTimeout())
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm(§5.3)
-	// Todo
+	// Todo //added
+	if args.PrevLogIndex<rf.getFirstLog().Index{
+		reply.Term=rf.currentTerm;
+		reply.Success=false
+		return 
+	}
 
 	// if an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it(§5.3)
 	if !rf.isLogMatched(args.PrevLogIndex,args.PrevLogTerm){ //return false ：index 不匹配 ｜｜term不匹配
-		reply.Term,reply.Success=rf.currentTerm,false // **
-		if args.PrevLogIndex>rf.getLastLog().Index{ //index 不匹配 
-			reply.ConflictIndex=rf.getLastLog().Index+1
+		reply.Term,reply.Success=rf.currentTerm,false 
+		if args.PrevLogIndex>rf.getLastLog().Index { //index 不匹配 
+			reply.ConflictIndex=rf.getLastLog().Index+1  //日志初始 PrevLogIndex 已经大于 getLastLog().Index
 			reply.ConflictTerm=-1
-		}else{		//term不匹配
+		}else{		//term不匹配 寻找匹配日志
 			index:=args.PrevLogIndex
 			fristlogindex:=rf.getFirstLog().Index
 			for index>=fristlogindex && rf.log[index-fristlogindex].Term==args.PrevLogTerm{
@@ -256,15 +262,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//
 	firstLogIndex:=rf.getFirstLog().Index
+
 	rf.log=append(rf.log[:args.PrevLogIndex+1-firstLogIndex],args.Entries...)
-	Debug(dWarn,"################# folllower log: %v",rf.log)
+	// need to be understand
+
+	// for index , entry:= range args.Entries {
+	// 	// find the junction of the existing log and the appended log. //why?
+	// 	if entry.Index-firstLogIndex>len(rf.log)||rf.log[entry.Index-firstLogIndex].Term!=entry.Term{
+	// 		rf.log=shrinkEntries(append(rf.log[:entry.Index-firstLogIndex],args.Entries[index:]...))
+	// 		rf.persist()
+	// 		break
+	// 	}
+	// }
+
 
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry) (paper)
 	newCommitIndex := Min(args.LeaderCommit, rf.getLastLog().Index)
 	if newCommitIndex > rf.commitIndex {
 		Debug(dInfo,"{Node %v} advances commitIndex from %v to %v with leaderCommit %v in term %v", rf.me, rf.commitIndex, newCommitIndex, args.LeaderCommit, rf.currentTerm)
 		rf.commitIndex = newCommitIndex
-		//rf.applyCond.Signal()
+
+		rf.applyCond<-1
 	}
 	reply.Term, reply.Success = rf.currentTerm, true
 } 
@@ -307,29 +325,29 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command :command,
 	})
 	
-	Debug(dWarn,"{Node %v}将{command %v}添加到日志 index:%v",rf.me,command,rf.getLastLog().Index)
-	Debug(dWarn,"################# leader log: %v",rf.log)
+	//Debug(dWarn,"{Node %v}将{command %v}添加到日志 index:%v",rf.me,command,rf.getLastLog().Index)
+	//Debug(dWarn,"################# leader log: %v",rf.log)
 	//** 更新匹配和下一索引 **
 	rf.nextIndex[rf.me]=newLogIndex+1
 	rf.matchIndex[rf.me]=newLogIndex
 
-	Debug(dWarn,"{Node %v} starts agreement on a new log entry with command %v in term %v", rf.me, command, rf.currentTerm)
+	Debug(dInfo,"{Node %v} starts agreement on a new log entry with command %v in term %v", rf.me, command, rf.currentTerm)
 	
 	//广播日志 TODO 自己不做 通过chan 通知 replicator 的 goruntion 去做，会循环查询 replicatorCond 状态
 	for peer:=range rf.peers {
 		if peer==rf.me {
 			continue
 		}
-		Debug(dWarn,"{Node %v} replicatorCond[%v]<-1", rf.me, peer)
+		//Debug(dWarn,"{Node %v} replicatorCond[%v]<-1", rf.me, peer)
 		rf.replicatorCond[peer]<-1 //signal
 
 	}
-	Debug(dWarn,"{Node %v} 广播日志 index:%v",rf.me,rf.getLastLog().Index)
+	//Debug(dWarn,"{Node %v} 广播日志 index:%v",rf.me,rf.getLastLog().Index)
 
 	index=newLogIndex
 	term=rf.currentTerm
 	isLeader=true
-	Debug(dWarn,"index %v,term %v,isLeader %v",index,term,isLeader)
+	//Debug(dWarn,"index %v,term %v,isLeader %v",index,term,isLeader)
 	return index,term,isLeader
 }
 
@@ -390,6 +408,34 @@ func (rf *Raft) ticker() {
 
 	}
 }
+func(rf *Raft) applier(){
+	for !rf.killed(){
+		// rf.mu.Lock()
+		// defer rf.mu.Unlock()
+		select {
+			case <-rf.applyCond:
+				if rf.commitIndex>rf.lastApplied{ //need to wait for the commitIndex to be advanced
+					firstLogIndex, commitIndex, lastApplied := rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied
+					entries:=make([]LogEntry,commitIndex-lastApplied)
+					copy(entries,rf.log[lastApplied-firstLogIndex+1:commitIndex-firstLogIndex+1])
+					for _, entry :=range entries{
+						rf.applyCh<- ApplyMsg{
+							CommandValid: true,
+							Command: entry.Command,
+							CommandIndex: entry.Index,
+							CommandTerm: entry.Term,
+						}
+					}
+					Debug(dCommit,"{Node %v} applies log entries from index %v to %v in term %v", rf.me, lastApplied+1, commitIndex, rf.currentTerm)
+					rf.lastApplied=Max(lastApplied,commitIndex)
+
+				}
+			default:
+				time.Sleep(50 * time.Millisecond) // 可调节的休眠时间
+			}
+	}
+
+}
 
 func(rf *Raft) replicator(peer int){
 	// rf.mu.Lock() 	//不能加锁 有很多peer 会发生死锁
@@ -409,6 +455,8 @@ func(rf *Raft) replicator(peer int){
 	}
 }
 
+
+
 func (rf *Raft) BoardCastLogs(peer int) { 
 	rf.mu.Lock()
 	defer rf.mu.Unlock() 
@@ -422,10 +470,10 @@ func (rf *Raft) BoardCastLogs(peer int) {
 			if reply.Term>rf.currentTerm{
 				rf.ChangeState(Follower)
 				rf.currentTerm, rf.votedFor = reply.Term, -1
-			}else { //log not match
+			}else if reply.Term == rf.currentTerm { //log not match
 				rf.nextIndex[peer]=reply.ConflictIndex
-				if reply.ConflictIndex!=-1{
-					index:=args.PrevLogIndex
+				if reply.ConflictIndex!=-1 {
+					index:=args.PrevLogIndex-1
 					firstLogIndex:=rf.getFirstLog().Index
 					for index>=firstLogIndex{
 						if rf.log[index-firstLogIndex].Term==reply.ConflictTerm{
@@ -440,6 +488,7 @@ func (rf *Raft) BoardCastLogs(peer int) {
 			rf.matchIndex[peer]=args.PrevLogIndex+len(args.Entries)
 			rf.nextIndex[peer]=rf.matchIndex[peer]+1
 			// **
+			rf.advanceCommitIndexForLeader()
 		}
 		Debug(dLog,"BoardCast-Logs :{Node %v} sends AppendEntriesArgs %v to {Node %v} and receives AppendEntriesReply %v", rf.me, args, peer, reply)
 	}
@@ -566,7 +615,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
+	// start apply goroutine to apply log entries to state machine
+	go rf.applier()
 
 	return rf
 }

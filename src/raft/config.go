@@ -549,7 +549,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
-		Debug(dWarn,"i %v index %v cmd1 %v cfg.logs %v ",i,index,cmd1,cfg.logs)
+		//Debug(dWarn,"i %v index %v cmd1 %v cfg.logs %v ",i,index,cmd1,cfg.logs)
 		if ok {
 			if count > 0 && cmd != cmd1 {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v",
@@ -622,24 +622,24 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			cfg.mu.Unlock()
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
-				Debug(dWarn,"{index1 %v} {ok %v}",index1,ok)
+				//Debug(dWarn,"{index1 %v} {ok %v}",index1,ok)
 				if ok {
-					Debug(dWarn,"break --")
+					//Debug(dWarn,"break --")
 					index = index1
 					break
 					
 				}
 			}
 		}
-		Debug(dWarn,"index %v",index)
+		//Debug(dWarn,"index %v",index)
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
-				Debug(dWarn,"time.Since(t1).Seconds() < 2 ")
+				//Debug(dWarn,"time.Since(t1).Seconds() < 2 ")
 				nd, cmd1 := cfg.nCommitted(index)
-				Debug(dWarn,"nd %v, cmd1 %v,index %v",nd, cmd1,index)
+				//Debug(dWarn,"nd %v, cmd1 %v,index %v",nd, cmd1,index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {

@@ -20,3 +20,6 @@ Lab3B:
 3 for i := range rf.peers {
 		rf.replicatorCond[i] = make(chan int) //无缓冲通道
 	}  // 使用chan作为信号量 要设置无缓冲通道
+4 AppendEntries 添加逻辑	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm(§5.3) 
+5 需要 applier 函数 固定到状态机
+6 advanceCommitIndexForLeader 函数根据已复制到大多数服务器的日志条目来更新领导者的提交索引，在BoardCastLogs 日志添加成功时调用
